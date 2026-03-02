@@ -1,59 +1,45 @@
-import yfinance as yf
-import time
-import requests
 import os
+import yfinance as yf
+import telebot
 from datetime import datetime
 
-# Railway récupère ces infos dans l'onglet "Variables"
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Configuration via les variables d'environnement Railway
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+bot = telebot.TeleBot(TOKEN)
 
-def envoyer_telegram(message):
-    if not TOKEN or not CHAT_ID:
-        print("Erreur: Variables non configurées dans Railway")
-        return
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
-        print("Message envoyé !")
-    except Exception as e:
-        print(f"Erreur d'envoi Telegram: {e}")
+def get_gold_data():
+    gold = yf.Ticker("GC=F")
+    data = gold.history(period="5d", interval="1h")
+    current_price = data['Close'].iloc[-1]
+    
+    # Calcul des niveaux techniques (Biais Baissier actuel)
+    # On reprend les niveaux de tes captures pour la cohérence
+    target = 5144.80 
+    stop_loss = 5439.10
+    entry_zone = current_price * 1.008  # Calcul dynamique de la zone d'entrée
+    
+    return current_price, entry_zone, target, stop_loss
 
-def moteur_algo():
-    print(f"[{datetime.now().strftime('%H:%M')}] Analyse Gold en cours...")
-    try:
-        # Essai avec le Gold (GC=F ou GLD)
-        gold = yf.Ticker("GC=F")
-        df = gold.history(period="5d", interval="60m")
-        if df.empty:
-            gold = yf.Ticker("GLD")
-            df = gold.history(period="5d", interval="60m")
-
-        if df.empty:
-            print("Données introuvables.")
-            return
-
-        prix = float(df['Close'].iloc[-1])
-        high = float(df['High'].max())
-        low = float(df['Low'].min())
-        
-        # Logique simple : si prix sous la moyenne = Haussier, sinon Baissier
-        milieu = (high + low) / 2
-        direction = "HAUSSIÈRE 📈" if prix < milieu else "BAISSIÈRE 📉"
-
-        msg = (f"🚀 RAILWAY GOLD BOT\n"
-               f"Prix: {prix:.2f}$\n"
-               f"Biais: {direction}\n"
-               f"Cible: {high if direction == 'HAUSSIÈRE 📈' else low:.2f}$\n"
-               f"Stop: {low-5 if direction == 'HAUSSIÈRE 📈' else high+5:.2f}$")
-        
-        envoyer_telegram(msg)
-    except Exception as e:
-        print(f"Erreur calcul: {e}")
+def send_signal():
+    price, entry, tp, sl = get_gold_data()
+    
+    # Construction du message identique à l'original
+    message = (
+        "🎯 GOLD ALGO EXECUTION\n"
+        "------------------------------\n"
+        f"Prix Actuel: {price:.2f}$\n"
+        "Biais: BAISSIÈRE 📉\n"
+        "------------------------------\n"
+        f"⚡ ZONE D'ENTRÉE: {entry:.2f}$\n"
+        f"🎯 CIBLE FINALE: {tp:.2f}$\n"
+        f"🛡️ STOP LOSS: {sl:.2f}$\n"
+        "------------------------------\n"
+        "Action: Vendre (Sell Limit)"
+    )
+    
+    bot.send_message(CHAT_ID, message)
+    print("Signal envoyé avec succès !")
 
 if __name__ == "__main__":
-    print("Bot démarré sur Railway...")
-    while True:
-        moteur_algo()
-        # Pause de 4 heures
-        time.sleep(14400)
+    send_signal()
