@@ -4,7 +4,6 @@ import requests
 import os
 from datetime import datetime
 
-# Railway récupère ces infos dans l'onglet "Variables"
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -16,36 +15,41 @@ def envoyer_telegram(message):
         print("Erreur d'envoi Telegram")
 
 def moteur_algo_final():
-    # 1. Récupération des données
+    # 1. Récupération des données (48h pour avoir le contexte d'hier et aujourd'hui)
     gold = yf.Ticker("GC=F") 
-    df = gold.history(period="5d", interval="60m")
+    df = gold.history(period="2d", interval="60m")
     
     if df.empty:
         print("Erreur : Impossible de récupérer les données")
         return
 
-    # 2. Calculs manuels (plus fiables)
     prix_actuel = df['Close'].iloc[-1]
-    high_recent = df['High'].max()
-    low_recent = df['Low'].min()
-    
-    # Calcul d'une zone d'entrée basée sur le retracement (Équilibre)
-    # Pour une vente, on veut que le prix remonte vers le milieu du range récent
-    zone_entree = (high_recent + prix_actuel) / 2
-    
-    # 3. Détermination du Biais
-    # Si le prix est plus proche du haut, l'algo anticipe un retour au bas
-    if prix_actuel > ((high_recent + low_recent) / 2):
-        direction = "BAISSIÈRE 📉"
-        target = low_recent
-        type_ordre = "Vendre (Sell Limit)"
-        stop_loss = high_recent + 5.0
-    else:
-        direction = "HAUSSIÈRE 📈"
-        target = high_recent
-        type_ordre = "Acheter (Buy Limit)"
-        stop_loss = low_recent - 5.0
+    # On définit le Range de travail sur les dernières 24 bougies (1 jour de trading)
+    high_24h = df['High'].iloc[-24:].max()
+    low_24h = df['Low'].iloc[-24:].min()
+    amplitude = high_24h - low_24h
 
+    # 2. Logique de Biais par rapport au Point Pivot (50% du Range)
+    pivot = (high_24h + low_24h) / 2
+    
+    if prix_actuel > pivot:
+        # BIAIS BAISSIER : On cherche à vendre le "Premium" (Haut du range)
+        direction = "BAISSIÈRE 📉"
+        # Entrée "Sniper" : Retracement de 75% du mouvement vers le haut
+        zone_entree = low_24h + (amplitude * 0.75)
+        target = low_24h # On vise le bas du range (Liquidité)
+        stop_loss = high_24h + 5.0 # Invalidation au-dessus du sommet réel
+        type_ordre = "Vendre (Sell Limit)"
+    else:
+        # BIAIS HAUSSIER : On cherche à acheter le "Discount" (Bas du range)
+        direction = "HAUSSIÈRE 📈"
+        # Entrée "Sniper" : Retracement de 25% du mouvement (achat à bas prix)
+        zone_entree = low_24h + (amplitude * 0.25)
+        target = high_24h # On vise le haut du range
+        stop_loss = low_24h - 5.0 # Invalidation sous le creux réel
+        type_ordre = "Acheter (Buy Limit)"
+
+    # 3. Formatage du message "Pro"
     alerte = (f"🎯 GOLD ALGO EXECUTION\n"
               f"----------------------------\n"
               f"Prix Actuel: {prix_actuel:.2f}$\n"
@@ -58,9 +62,8 @@ def moteur_algo_final():
               f"Action: {type_ordre}")
     
     envoyer_telegram(alerte)
-    print(f"Rapport envoyé à {datetime.now().strftime('%H:%M')}")
+    print(f"Rapport structurel envoyé à {datetime.now().strftime('%H:%M')}")
 
-# Lancement de la boucle
 while True:
     moteur_algo_final()
-    time.sleep(14400) # Toutes les 4 heures
+    time.sleep(14400) # Analyse toutes les 4 heures
