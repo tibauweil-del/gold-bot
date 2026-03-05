@@ -5,95 +5,96 @@ import os
 import numpy as np
 from datetime import datetime
 
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+RECAP_ENVOYE = False # Pour éviter les envois multiples à 22h
 
 def envoyer_telegram(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={message}"
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}/&text={message}"
     try:
         requests.get(url)
     except:
         print("Erreur d'envoi Telegram")
 
 def detecter_liquidite(df, tolerance=0.0015):
-    """Identifie les Equal Highs (BSL) et Equal Lows (SSL)"""
+    """Repère les Equal Highs (BSL) et Equal Lows (SSL) dynamiquement"""
     highs = df['High'].values
     lows = df['Low'].values
-    bsl_zones = []
-    ssl_zones = []
+    bsl_zones, ssl_zones = [], []
 
-    for i in range(len(df) - 30, len(df)): # Analyse des 30 dernières zones
-        prix_h, prix_l = highs[i], lows[i]
-        
-        # Compte les sommets/creux alignés dans l'historique
-        count_h = np.sum(np.abs(highs - prix_h) < (prix_h * tolerance))
-        count_l = np.sum(np.abs(lows - prix_l) < (prix_l * tolerance))
-        
-        if count_h >= 2 and not any(abs(z - prix_h) < 10 for z in bsl_zones):
-            bsl_zones.append(prix_h)
-        if count_l >= 2 and not any(abs(z - prix_l) < 10 for z in ssl_zones):
-            ssl_zones.append(prix_l)
-            
+    # On analyse les zones de prix sur les 100 dernières bougies
+    for i in range(len(df) - 50, len(df)):
+        p_h, p_l = highs[i], lows[i]
+        # Recherche de clusters (alignement de mèches)
+        if np.sum(np.abs(highs - p_h) < (p_h * tolerance)) >= 2:
+            if not any(abs(z - p_h) < 10 for z in bsl_zones): bsl_zones.append(p_h)
+        if np.sum(np.abs(lows - p_l) < (p_l * tolerance)) >= 2:
+            if not any(abs(z - p_l) < 10 for z in ssl_zones): ssl_zones.append(p_l)
     return bsl_zones, ssl_zones
 
 def moteur_algo_smc():
-    # 1. Analyse Multi-Timeframe (H4 pour la structure, H1 pour le sweep)
-    gold_h4 = yf.Ticker("GC=F").history(period="1mo", interval="1h")
-    if gold_h4.empty: return
+    global RECAP_ENVOYE
+    # 1. Récupération des données (Contexte 1 mois / Action 1h)
+    data = yf.Ticker("GC=F").history(period="1mo", interval="1h")
+    if data.empty: return
 
-    prix_actuel = gold_h4['Close'].iloc[-1]
-    bsl, ssl = detecter_liquidite(gold_h4)
-    
-    # 2. Logique de détection de Manipulation (Sweep & Reclaim)
+    prix_actuel = data['Close'].iloc[-1]
+    bsl, ssl = detecter_liquidite(data)
+    maintenant = datetime.now()
+
+    # --- LOGIQUE DE SESSION (RAPPORT 22H) ---
+    if maintenant.hour == 22 and not RECAP_ENVOYE:
+        envoi_rapport_final(bsl, ssl, prix_actuel, data)
+        RECAP_ENVOYE = True
+    if maintenant.hour == 23: RECAP_ENVOYE = False
+
+    # --- LOGIQUE DE TRADING (SWEEP & RECLAIM) ---
     for zone_ssl in ssl:
-        # On vérifie si la bougie précédente a "mèché" sous la SSL
-        a_balaye = gold_h4['Low'].iloc[-2] < zone_ssl
-        a_reintegre = prix_actuel > zone_ssl
-        
-        if a_balaye and a_reintegre:
-            # Plan Haussier après nettoyage des stops
-            tp = max(bsl) if bsl else prix_actuel + 200
-            sl = gold_h4['Low'].iloc[-2] - 10 # SL sous la mèche de manipulation
-            
-            alerte = (f"🛡️ SMC DETECTED: LIQUIDITY SWEEP\n"
+        # Si le prix a percé la SSL puis est remonté (Manipulation Haussière)
+        if data['Low'].iloc[-2] < zone_ssl and prix_actuel > zone_ssl:
+            tp = max(bsl) if bsl else prix_actuel + 150
+            sl = data['Low'].iloc[-2] - 5 # SL sous la mèche de chasse
+            alerte = (f"🛡️ SMC BUY SIGNAL: SSL SWEEP\n"
                       f"----------------------------\n"
-                      f"Nettoyage SSL effectué à: {zone_ssl:.2f}$\n"
-                      f"Prix actuel (Reclaim): {prix_actuel:.2f}$\n"
-                      f"----------------------------\n"
-                      f"⚡ ENTRÉE (OTE): {prix_actuel:.2f}$\n"
+                      f"Zone nettoyée: {zone_ssl:.2f}$\n"
+                      f"Entrée Reclaim: {prix_actuel:.2f}$\n"
                       f"🎯 TARGET (BSL): {tp:.2f}$\n"
                       f"🛡️ STOP LOSS: {sl:.2f}$\n"
-                      f"----------------------------\n"
-                      f"Ratio estimé: 1:{abs((tp-prix_actuel)/(prix_actuel-sl)):.1f}")
+                      f"Ratio: 1:{abs((tp-prix_actuel)/(prix_actuel-sl)):.1f}")
             envoyer_telegram(alerte)
             return
 
     for zone_bsl in bsl:
-        # On vérifie si la bougie précédente a "mèché" au-dessus de la BSL
-        a_balaye = gold_h4['High'].iloc[-2] > zone_bsl
-        a_reintegre = prix_actuel < zone_bsl
-        
-        if a_balaye and a_reintegre:
-            # Plan Baissier après nettoyage des acheteurs
-            tp = min(ssl) if ssl else prix_actuel - 200
-            sl = gold_h4['High'].iloc[-2] + 10 # SL au-dessus de la mèche
-            
-            alerte = (f"📉 SMC DETECTED: BSL SWEEP\n"
+        # Si le prix a percé la BSL puis est redescendu (Manipulation Baissière)
+        if data['High'].iloc[-2] > zone_bsl and prix_actuel < zone_bsl:
+            tp = min(ssl) if ssl else prix_actuel - 150
+            sl = data['High'].iloc[-2] + 5 # SL au-dessus de la mèche de chasse
+            alerte = (f"📉 SMC SELL SIGNAL: BSL SWEEP\n"
                       f"----------------------------\n"
-                      f"Nettoyage BSL effectué à: {zone_bsl:.2f}$\n"
-                      f"Prix actuel (Reclaim): {prix_actuel:.2f}$\n"
-                      f"----------------------------\n"
-                      f"⚡ ENTRÉE (OTE): {prix_actuel:.2f}$\n"
+                      f"Zone nettoyée: {zone_bsl:.2f}$\n"
+                      f"Entrée Reclaim: {prix_actuel:.2f}$\n"
                       f"🎯 TARGET (SSL): {tp:.2f}$\n"
-                      f"🛡️ STOP LOSS: {sl:.2f}$\n"
-                      f"----------------------------\n"
-                      f"Action: Vendre (Short)")
+                      f"🛡️ STOP LOSS: {sl:.2f}$")
             envoyer_telegram(alerte)
             return
 
-    print(f"[{datetime.now().strftime('%H:%M')}] Marché en zone neutre (Equilibrium).")
+def envoi_rapport_final(bsl, ssl, prix, df):
+    high_w, low_w = df['High'].max(), df['Low'].min()
+    pos = (prix - low_w) / (high_w - low_w) * 100
+    msg = (f"🏛️ RÉCAPITULATIF POST-SESSION US\n"
+           f"----------------------------\n"
+           f"Clôture Gold: {prix:.2f}$\n"
+           f"Position Range Hebdo: {pos:.1f}%\n"
+           f"Biais: {'PREMIUM 🔴' if pos > 70 else 'DISCOUNT 🟢' if pos < 30 else 'EQUILIBRIUM 🟡'}\n\n"
+           f"📋 ZONES ACTIVES POUR DEMAIN :\n"
+           f"• SSL (Achat): {sorted(ssl)[-1] if ssl else 'N/A':.2f}$\n"
+           f"• BSL (Vente): {sorted(bsl)[0] if bsl else 'N/A':.2f}$\n"
+           f"----------------------------\n"
+           f"Bot en veille structurelle.")
+    envoyer_telegram(msg)
 
-# Boucle d'analyse (toutes les heures pour ne pas rater la réintégration)
+# Lancement du bot
 while True:
     moteur_algo_smc()
-    time.sleep(3600)
+    time.sleep(3600) # Vérification horaire
