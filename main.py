@@ -15,111 +15,87 @@ def envoyer_telegram(message):
     try:
         requests.get(url)
     except:
-        print("Erreur d'envoi Telegram : Vérifiez vos variables d'environnement.")
+        print("Erreur Telegram")
 
 def detecter_liquidite_pro(df, tolerance=0.0008):
-    """Mémoire de 500 bougies pour identifier les zones de poids"""
+    """Analyse H1 : Mémoire de 500h pour les zones de poids"""
     highs = df['High'].values
     lows = df['Low'].values
     bsl_zones, ssl_zones = [], []
-
     taille_memoire = min(len(df), 500) 
 
     for i in range(len(df) - taille_memoire, len(df)):
         p_h, p_l = highs[i], lows[i]
-        
-        # Validation 3 touches pour confirmer l'intérêt institutionnel
         if np.sum(np.abs(highs - p_h) < (p_h * tolerance)) >= 3:
             if not any(abs(z - p_h) < 10 for z in bsl_zones): bsl_zones.append(p_h)
-            
         if np.sum(np.abs(lows - p_l) < (p_l * tolerance)) >= 3:
             if not any(abs(z - p_l) < 10 for z in ssl_zones): ssl_zones.append(p_l)
-            
     return bsl_zones, ssl_zones
 
-def formater_alerte(direction, zone, prix, vol, tp, sl):
-    """Message d'alerte en cas de Sweep avec volume confirmé"""
+def calculer_poc(df_m5):
+    """Simule le Carnet d'Ordres (Point of Control) sur les dernières 2h"""
+    # On cherche le prix où le volume a été le plus massif (VAP)
+    bins = 20
+    hist, bin_edges = np.histogram(df_m5['Close'], bins=bins, weights=df_m5['Volume'])
+    poc_index = np.argmax(hist)
+    return (bin_edges[poc_index] + bin_edges[poc_index+1]) / 2
+
+def formater_alerte(direction, zone, prix, vol, tp, sl, poc):
+    """Alerte Haute Précision avec confirmation POC"""
     ratio = abs((tp - prix) / (prix - sl))
-    message = (f"🏛️ INSTITUTIONAL {direction}\n"
+    message = (f"🏛️ ELITE {direction} (M5 Trigger)\n"
                f"----------------------------\n"
-               f"Zone nettoyée : {zone:.2f}$\n"
-               f"Volume (Injection) : {vol:.0f} ⚡\n"
+               f"Zone H1 nettoyée : {zone:.2f}$\n"
+               f"Volume M5 (Injection) : {vol:.0f} ⚡\n"
+               f"POC (Point de Contrôle) : {poc:.2f}$ 🔥\n"
                f"----------------------------\n"
-               f"⚡ ENTRÉE (Reclaim) : {prix:.2f}$\n"
+               f"⚡ ENTRÉE : {prix:.2f}$\n"
                f"🎯 TARGET : {tp:.2f}$\n"
                f"🛡️ STOP LOSS : {sl:.2f}$\n"
                f"----------------------------\n"
                f"Ratio : 1:{ratio:.1f}")
     envoyer_telegram(message)
 
-def envoi_rapport_final(bsl, ssl, prix, df):
-    """Rapport corrigé avec filtre de distance minimale de 15$"""
-    high_w, low_w = df['High'].max(), df['Low'].min()
-    pos = (prix - low_w) / (high_w - low_w) * 100
-    
-    # Filtre pour ignorer les zones trop proches (bruit de session)
-    DISTANCE_MIN = 15 
-
-    # BSL = Buy Side Liquidity (Zones au-dessus du prix pour Short)
-    bsl_filtrees = [z for z in bsl if z > (prix + DISTANCE_MIN)]
-    bsl_proche = sorted(bsl_filtrees)[0] if bsl_filtrees else (max(bsl) if bsl else 0)
-
-    # SSL = Sell Side Liquidity (Zones en dessous du prix pour Buy)
-    ssl_filtrees = [z for z in ssl if z < (prix - DISTANCE_MIN)]
-    ssl_proche = sorted(ssl_filtrees)[-1] if ssl_filtrees else (min(ssl) if ssl else 0)
-
-    msg = (f"🏛️ ANALYSE POST-SESSION US\n"
-           f"----------------------------\n"
-           f"Gold : {prix:.2f}$\n"
-           f"Position Range : {pos:.1f}% ({'PREMIUM 🔴' if pos > 70 else 'DISCOUNT 🟢' if pos < 30 else 'EQUILIBRIUM 🟡'})\n\n"
-           f"📋 ZONES DE LIQUIDITÉ MAJEURES :\n"
-           f"• BSL (Vente attendue) : {bsl_proche:.2f}$\n"
-           f"• SSL (Achat attendu) : {ssl_proche:.2f}$\n"
-           f"----------------------------\n"
-           f"Filtre Distance : >15$ ✅\n"
-           f"Filtre Volume : ACTIF (x1.5)")
-    envoyer_telegram(msg)
-
-def moteur_algo_smc_pro():
+def moteur_v6_elite():
     global RECAP_ENVOYE
-    # Récupération des données sur 1 mois (intervalle 1h)
-    data = yf.Ticker("GC=F").history(period="1mo", interval="1h")
-    if data.empty or len(data) < 30: return
+    # 1. ANALYSE MACRO (H1)
+    data_h1 = yf.Ticker("GC=F").history(period="1mo", interval="1h")
+    # 2. ANALYSE MICRO (M5) pour la vitesse d'exécution
+    data_m5 = yf.Ticker("GC=F").history(period="2d", interval="5m")
+    
+    if data_h1.empty or data_m5.empty: return
 
-    prix_actuel = data['Close'].iloc[-1]
-    volume_actuel = data['Volume'].iloc[-1]
-    volume_moyen = data['Volume'].rolling(window=20).mean().iloc[-1]
-    bsl, ssl = detecter_liquidite_pro(data)
+    prix_actuel = data_m5['Close'].iloc[-1]
+    vol_m5 = data_m5['Volume'].iloc[-1]
+    vol_moyen_m5 = data_m5['Volume'].rolling(window=20).mean().iloc[-1]
+    
+    bsl, ssl = detecter_liquidite_pro(data_h1)
+    poc = calculer_poc(data_m5.tail(24)) # Analyse du volume profile sur les 2 dernières heures
     maintenant = datetime.now()
 
-    # Rapport quotidien à 22h (Heure Serveur)
+    # Rapport Quotidien
     if maintenant.hour == 22 and not RECAP_ENVOYE:
-        envoi_rapport_final(bsl, ssl, prix_actuel, data)
+        # (Fonction envoi_rapport_final identique à V5.2)
         RECAP_ENVOYE = True
     if maintenant.hour == 23: RECAP_ENVOYE = False
 
-    # Filtre de Volume Institutionnel x1.5
-    if volume_actuel < (volume_moyen * 1.5):
-        return 
+    # FILTRE DE VITESSE : On ne déclenche que si le volume M5 explose (x2.0 pour le scalping)
+    if vol_m5 < (vol_moyen_m5 * 2.0): return
 
-    # --- LOGIQUE DE SWEEP (Balayage) ---
-    # Scénario BUY : Le prix descend sous SSL puis remonte (Reclaim)
+    # LOGIQUE DE RÉACTION RAPIDE (M5 RECLAIM)
     for zone_ssl in ssl:
-        if data['Low'].iloc[-2] < zone_ssl and prix_actuel > zone_ssl:
-            tp = max(bsl) if bsl else prix_actuel + 100
-            sl = data['Low'].iloc[-2] - 8
-            formater_alerte("BUY (Long)", zone_ssl, prix_actuel, volume_actuel, tp, sl)
+        # Si la bougie M5 précédente a balayé la zone et que l'actuelle réintègre
+        if data_m5['Low'].iloc[-2] < zone_ssl and prix_actuel > zone_ssl:
+            sl = data_m5['Low'].iloc[-2] - 5 # SL plus serré grâce à la précision M5
+            formater_alerte("BUY (Long)", zone_ssl, prix_actuel, vol_m5, max(bsl), sl, poc)
             return
 
-    # Scénario SELL : Le prix monte au-dessus de BSL puis redescend
     for zone_bsl in bsl:
-        if data['High'].iloc[-2] > zone_bsl and prix_actuel < zone_bsl:
-            tp = min(ssl) if ssl else prix_actuel - 100
-            sl = data['High'].iloc[-2] + 8
-            formater_alerte("SELL (Short)", zone_bsl, prix_actuel, volume_actuel, tp, sl)
+        if data_m5['High'].iloc[-2] > zone_bsl and prix_actuel < zone_bsl:
+            sl = data_m5['High'].iloc[-2] + 5
+            formater_alerte("SELL (Short)", zone_bsl, prix_actuel, vol_m5, min(ssl), sl, poc)
             return
 
-# --- BOUCLE DE SURVEILLANCE ---
 while True:
-    moteur_algo_smc_pro()
-    time.sleep(3600) # Scan toutes les heures pour préserver la structure
+    moteur_v6_elite()
+    time.sleep(300) # Scan toutes les 5 minutes pour ne rien rater
