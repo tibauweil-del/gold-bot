@@ -18,18 +18,17 @@ def envoyer_telegram(message):
         print("Erreur d'envoi Telegram : Vérifiez vos variables d'environnement.")
 
 def detecter_liquidite_pro(df, tolerance=0.0008):
-    """Mémoire augmentée : Analyse les 500 dernières bougies (1 mois de trading)"""
+    """Mémoire de 500 bougies pour identifier les zones de poids"""
     highs = df['High'].values
     lows = df['Low'].values
     bsl_zones, ssl_zones = [], []
 
-    # On définit la fenêtre de mémoire sur 500 bougies pour capter les zones historiques
     taille_memoire = min(len(df), 500) 
 
     for i in range(len(df) - taille_memoire, len(df)):
         p_h, p_l = highs[i], lows[i]
         
-        # Validation 3 touches : cherche des plateaux horizontaux solides
+        # Validation 3 touches pour confirmer l'intérêt institutionnel
         if np.sum(np.abs(highs - p_h) < (p_h * tolerance)) >= 3:
             if not any(abs(z - p_h) < 10 for z in bsl_zones): bsl_zones.append(p_h)
             
@@ -39,7 +38,7 @@ def detecter_liquidite_pro(df, tolerance=0.0008):
     return bsl_zones, ssl_zones
 
 def formater_alerte(direction, zone, prix, vol, tp, sl):
-    """Structure de message professionnelle pour Telegram"""
+    """Message d'alerte en cas de Sweep avec volume confirmé"""
     ratio = abs((tp - prix) / (prix - sl))
     message = (f"🏛️ INSTITUTIONAL {direction}\n"
                f"----------------------------\n"
@@ -54,13 +53,20 @@ def formater_alerte(direction, zone, prix, vol, tp, sl):
     envoyer_telegram(message)
 
 def envoi_rapport_final(bsl, ssl, prix, df):
-    """Génère le rapport quotidien corrigé"""
+    """Rapport corrigé avec filtre de distance minimale de 15$"""
     high_w, low_w = df['High'].max(), df['Low'].min()
     pos = (prix - low_w) / (high_w - low_w) * 100
     
-    # Correction de l'inversion : BSL (Haut/Vente), SSL (Bas/Achat)
-    bsl_proche = sorted([z for z in bsl if z > prix])[0] if bsl else (max(bsl) if bsl else 0)
-    ssl_proche = sorted([z for z in ssl if z < prix])[-1] if ssl else (min(ssl) if ssl else 0)
+    # Filtre pour ignorer les zones trop proches (bruit de session)
+    DISTANCE_MIN = 15 
+
+    # BSL = Buy Side Liquidity (Zones au-dessus du prix pour Short)
+    bsl_filtrees = [z for z in bsl if z > (prix + DISTANCE_MIN)]
+    bsl_proche = sorted(bsl_filtrees)[0] if bsl_filtrees else (max(bsl) if bsl else 0)
+
+    # SSL = Sell Side Liquidity (Zones en dessous du prix pour Buy)
+    ssl_filtrees = [z for z in ssl if z < (prix - DISTANCE_MIN)]
+    ssl_proche = sorted(ssl_filtrees)[-1] if ssl_filtrees else (min(ssl) if ssl else 0)
 
     msg = (f"🏛️ ANALYSE POST-SESSION US\n"
            f"----------------------------\n"
@@ -70,12 +76,13 @@ def envoi_rapport_final(bsl, ssl, prix, df):
            f"• BSL (Vente attendue) : {bsl_proche:.2f}$\n"
            f"• SSL (Achat attendu) : {ssl_proche:.2f}$\n"
            f"----------------------------\n"
+           f"Filtre Distance : >15$ ✅\n"
            f"Filtre Volume : ACTIF (x1.5)")
     envoyer_telegram(msg)
 
 def moteur_algo_smc_pro():
     global RECAP_ENVOYE
-    # On télécharge assez de données pour la mémoire de 500h
+    # Récupération des données sur 1 mois (intervalle 1h)
     data = yf.Ticker("GC=F").history(period="1mo", interval="1h")
     if data.empty or len(data) < 30: return
 
@@ -85,7 +92,7 @@ def moteur_algo_smc_pro():
     bsl, ssl = detecter_liquidite_pro(data)
     maintenant = datetime.now()
 
-    # Rapport quotidien à 22h
+    # Rapport quotidien à 22h (Heure Serveur)
     if maintenant.hour == 22 and not RECAP_ENVOYE:
         envoi_rapport_final(bsl, ssl, prix_actuel, data)
         RECAP_ENVOYE = True
@@ -95,7 +102,8 @@ def moteur_algo_smc_pro():
     if volume_actuel < (volume_moyen * 1.5):
         return 
 
-    # Logique d'Achat (SSL Sweep)
+    # --- LOGIQUE DE SWEEP (Balayage) ---
+    # Scénario BUY : Le prix descend sous SSL puis remonte (Reclaim)
     for zone_ssl in ssl:
         if data['Low'].iloc[-2] < zone_ssl and prix_actuel > zone_ssl:
             tp = max(bsl) if bsl else prix_actuel + 100
@@ -103,7 +111,7 @@ def moteur_algo_smc_pro():
             formater_alerte("BUY (Long)", zone_ssl, prix_actuel, volume_actuel, tp, sl)
             return
 
-    # Logique de Vente (BSL Sweep)
+    # Scénario SELL : Le prix monte au-dessus de BSL puis redescend
     for zone_bsl in bsl:
         if data['High'].iloc[-2] > zone_bsl and prix_actuel < zone_bsl:
             tp = min(ssl) if ssl else prix_actuel - 100
@@ -111,7 +119,7 @@ def moteur_algo_smc_pro():
             formater_alerte("SELL (Short)", zone_bsl, prix_actuel, volume_actuel, tp, sl)
             return
 
-# --- BOUCLE PRINCIPALE ---
+# --- BOUCLE DE SURVEILLANCE ---
 while True:
     moteur_algo_smc_pro()
-    time.sleep(3600)
+    time.sleep(3600) # Scan toutes les heures pour préserver la structure
